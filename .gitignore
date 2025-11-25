@@ -40,3 +40,5 @@ coverage.json
 coverage*.json
 *.lcov
 lcov.info
+echo "coverage/" >> .gitignore
+echo "coverage.json" >> .gitignore
