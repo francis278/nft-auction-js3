@@ -233,24 +233,6 @@ describe("NFT Auction Market", function () {
             expect(await nftContract.ownerOf(tokenId)).to.equal(bidder1.address);
         });
 
-        // it("非管理员不能结束拍卖", async function () {
-        //     // 先进行出价
-        //     await auction.connect(bidder1).bidWith(
-        //         0,
-        //         bidAmount,
-        //         ethers.ZeroAddress,
-        //         { value: bidAmount }
-        //     );
-
-        //     // 等待拍卖结束
-        //     await ethers.provider.send("evm_increaseTime", [600]);
-        //     await ethers.provider.send("evm_mine");
-
-        //     await expect(
-        //         auction.connect(bidder1).endAuction(0)
-        //     ).to.be.reverted; // 应该被拒绝
-        // });
-
         it("不能在拍卖未结束时结束拍卖", async function () {
             // 进行出价
             await auction.connect(bidder1).bidWith(
@@ -286,31 +268,6 @@ describe("NFT Auction Market", function () {
             ).to.be.revertedWith("Auction has not ended");
         });
 
-        // it("如果无人出价，NFT应返还给卖家", async function () {
-        //     // 铸造新的NFT用于测试
-        //     const newTokenId = 2;
-        //     await nftContract.mint(admin.address, newTokenId);
-        //     await nftContract.connect(admin).approve(await auction.getAddress(), newTokenId);
-
-        //     // 创建新拍卖
-        //     await auction.connect(admin).createAuction(
-        //         600,
-        //         nftAddress,
-        //         startingPrice,
-        //         newTokenId
-        //     );
-
-        //     // 等待拍卖结束（无人出价）
-        //     await ethers.provider.send("evm_increaseTime", [600]);
-        //     await ethers.provider.send("evm_mine");
-
-        //     // 结束拍卖
-        //     await auction.connect(admin).endAuction(1);
-
-        //     // 验证NFT返还给卖家（管理员）
-        //     expect(await nftContract.ownerOf(newTokenId)).to.equal(admin.address);
-        // });
-
         it("结束拍卖后资金应转移给卖家", async function () {
             // 记录卖家初始余额
             const initialSellerBalance = await ethers.provider.getBalance(admin.address);
@@ -339,8 +296,6 @@ describe("NFT Auction Market", function () {
         });
     });
 
-
-
     describe("合约升级权限", function () {
         it("应该正确设置管理员", async function () {
             // 验证管理员地址正确设置
@@ -360,45 +315,25 @@ describe("NFT Auction Market", function () {
             ).not.to.be.reverted;
         });
 
-        // it("非管理员不能执行管理操作", async function () {
-        //     const MockPriceFeed = await ethers.getContractFactory("MockPriceFeed");
-        //     const mockPriceFeed = await MockPriceFeed.deploy(2000 * 10 ** 8);
-        //     await mockPriceFeed.waitForDeployment();
-
-        //     // 非管理员应该被拒绝
-        //     await expect(
-        //         auction.connect(bidder1).setPriceFeed(ethers.ZeroAddress, await mockPriceFeed.getAddress())
-        //     ).to.be.reverted;
-        // });
     });
 
-
-
-
-    describe("ERC20支付结束拍卖", function () {
+    describe("ERC20转账分支", function () {
         let mockERC20, mockPriceFeed;
 
         beforeEach(async function () {
-            // 部署ERC20代币和价格预言机
+            // 部署ERC20代币
             const MockERC20 = await ethers.getContractFactory("MockERC20");
             mockERC20 = await MockERC20.deploy("Test Token", "TEST", ethers.parseEther("1000"));
             await mockERC20.waitForDeployment();
 
+            // 部署价格预言机
             const MockPriceFeed = await ethers.getContractFactory("MockPriceFeed");
-            mockPriceFeed = await MockPriceFeed.deploy(1 * 10 ** 8);
+            mockPriceFeed = await MockPriceFeed.deploy(1 * 10 ** 8); // 1:1 价格
             await mockPriceFeed.waitForDeployment();
 
-            // 设置ERC20的价格预言机
-            await auction.connect(admin).setPriceFeed(
-                await mockERC20.getAddress(),
-                await mockPriceFeed.getAddress()
-            );
-
-            // 设置ETH的价格预言机
-            await auction.connect(admin).setPriceFeed(
-                ethers.ZeroAddress,
-                await mockPriceFeed.getAddress()
-            );
+            // 设置价格预言机（ETH和ERC20都用同一个）
+            await auction.connect(admin).setPriceFeed(ethers.ZeroAddress, await mockPriceFeed.getAddress());
+            await auction.connect(admin).setPriceFeed(await mockERC20.getAddress(), await mockPriceFeed.getAddress());
 
             // 创建拍卖
             await auction.connect(admin).createAuction(
@@ -407,22 +342,217 @@ describe("NFT Auction Market", function () {
                 ethers.parseEther("100"),
                 tokenId
             );
+
+            // 给bidder1转账ERC20代币
+            await mockERC20.connect(admin).transfer(bidder1.address, ethers.parseEther("200"));
         });
 
-        it("应该用ERC20支付结束拍卖", async function () {
-            // 先做一个很小的ETH出价来设置tokenAddress
-            await auction.connect(bidder2).bidWith(
-                0,
-                ethers.parseEther("0.1"),
-                ethers.ZeroAddress,
-                { value: ethers.parseEther("0.1") }
-            );
-
-            // 给bidder1转账并授权
-            await mockERC20.connect(admin).transfer(bidder1.address, ethers.parseEther("200"));
+        it("应该执行ERC20 transferFrom分支", async function () {
+            // 授权拍卖合约使用代币
             await mockERC20.connect(bidder1).approve(await auction.getAddress(), ethers.parseEther("150"));
 
-            // 用ERC20出价覆盖
+            // 记录初始余额
+            const initialBidderBalance = await mockERC20.balanceOf(bidder1.address);
+            const initialContractBalance = await mockERC20.balanceOf(await auction.getAddress());
+
+            // 使用ERC20出价 - 这会进入ERC20 transferFrom分支
+            await auction.connect(bidder1).bidWith(
+                0,
+                ethers.parseEther("150"),
+                await mockERC20.getAddress()
+            );
+
+            // 验证ERC20转账成功
+            const finalBidderBalance = await mockERC20.balanceOf(bidder1.address);
+            const finalContractBalance = await mockERC20.balanceOf(await auction.getAddress());
+
+            expect(finalBidderBalance).to.equal(initialBidderBalance - ethers.parseEther("150"));
+            expect(finalContractBalance).to.equal(initialContractBalance + ethers.parseEther("150"));
+        });
+    });
+
+    describe("ERC20退款分支", function () {
+        let mockERC20, mockPriceFeed;
+
+        beforeEach(async function () {
+            // 部署ERC20代币
+            const MockERC20 = await ethers.getContractFactory("MockERC20");
+            mockERC20 = await MockERC20.deploy("Test Token", "TEST", ethers.parseEther("1000"));
+            await mockERC20.waitForDeployment();
+
+            // 部署价格预言机
+            const MockPriceFeed = await ethers.getContractFactory("MockPriceFeed");
+            mockPriceFeed = await MockPriceFeed.deploy(1 * 10 ** 8); // 1:1 价格
+            await mockPriceFeed.waitForDeployment();
+
+            // 设置价格预言机
+            await auction.connect(admin).setPriceFeed(ethers.ZeroAddress, await mockPriceFeed.getAddress());
+            await auction.connect(admin).setPriceFeed(await mockERC20.getAddress(), await mockPriceFeed.getAddress());
+
+            // 创建拍卖
+            await auction.connect(admin).createAuction(
+                600,
+                nftAddress,
+                ethers.parseEther("100"),
+                tokenId
+            );
+
+            // 给两个出价者转账ERC20代币
+            await mockERC20.connect(admin).transfer(bidder1.address, ethers.parseEther("200"));
+            await mockERC20.connect(admin).transfer(bidder2.address, ethers.parseEther("200"));
+        });
+
+        it("应该执行ERC20退款分支", async function () {
+            // 记录初始余额
+            const initialBidder1Balance = await mockERC20.balanceOf(bidder1.address);
+            console.log("bidder1初始余额:", initialBidder1Balance.toString());
+
+            // 第一个出价者授权并出价
+            await mockERC20.connect(bidder1).approve(await auction.getAddress(), ethers.parseEther("120"));
+            await auction.connect(bidder1).bidWith(
+                0,
+                ethers.parseEther("120"),
+                await mockERC20.getAddress()
+            );
+
+            // 第一次出价后的余额
+            const afterFirstBidBalance = await mockERC20.balanceOf(bidder1.address);
+            console.log("第一次出价后余额:", afterFirstBidBalance.toString());
+
+            // 第二个出价者授权并用更高价出价 - 这会触发ERC20退款分支
+            await mockERC20.connect(bidder2).approve(await auction.getAddress(), ethers.parseEther("150"));
+            await auction.connect(bidder2).bidWith(
+                0,
+                ethers.parseEther("150"),
+                await mockERC20.getAddress()
+            );
+
+            // 最终余额
+            const finalBidder1Balance = await mockERC20.balanceOf(bidder1.address);
+            console.log("第二次出价后余额:", finalBidder1Balance.toString());
+
+            // 验证第一个出价者收到了ERC20退款
+            // 期望：初始余额 - 第一次出价 + 退款 = 初始余额
+            expect(finalBidder1Balance).to.equal(initialBidder1Balance);
+
+            // 验证第二个出价者成为新的最高出价者
+            const auctionInfo = await auction.auctions(0);
+            expect(auctionInfo.highestBidder).to.equal(bidder2.address);
+            expect(auctionInfo.highestBid).to.equal(ethers.parseEther("150"));
+        });
+    });
+
+    describe("ETH退款分支", function () {
+        let mockPriceFeed;
+
+        beforeEach(async function () {
+            // 部署价格预言机
+            const MockPriceFeed = await ethers.getContractFactory("MockPriceFeed");
+            mockPriceFeed = await MockPriceFeed.deploy(1 * 10 ** 8); // 1:1 价格
+            await mockPriceFeed.waitForDeployment();
+
+            // 设置ETH价格预言机
+            await auction.connect(admin).setPriceFeed(ethers.ZeroAddress, await mockPriceFeed.getAddress());
+
+            // 创建拍卖
+            await auction.connect(admin).createAuction(
+                600,
+                nftAddress,
+                ethers.parseEther("1.0"),
+                tokenId
+            );
+        });
+
+        it("应该执行ETH退款分支", async function () {
+            // 记录第一个出价者初始余额
+            const initialBidder1Balance = await ethers.provider.getBalance(bidder1.address);
+
+            // 第一个出价者用ETH出价
+            const firstBidAmount = ethers.parseEther("1.5");
+            const bidTx1 = await auction.connect(bidder1).bidWith(
+                0,
+                firstBidAmount,
+                ethers.ZeroAddress,
+                { value: firstBidAmount }
+            );
+            const receipt1 = await bidTx1.wait();
+            const gasUsed1 = receipt1.gasUsed * receipt1.gasPrice;
+
+            // 第一次出价后的余额（考虑gas费用）
+            const afterFirstBidBalance = await ethers.provider.getBalance(bidder1.address);
+
+            // 记录第二个出价者初始余额
+            const initialBidder2Balance = await ethers.provider.getBalance(bidder2.address);
+
+            // 第二个出价者用更高价ETH出价 - 这会触发ETH退款分支
+            const secondBidAmount = ethers.parseEther("2.0");
+            const bidTx2 = await auction.connect(bidder2).bidWith(
+                0,
+                secondBidAmount,
+                ethers.ZeroAddress,
+                { value: secondBidAmount }
+            );
+            const receipt2 = await bidTx2.wait();
+            const gasUsed2 = receipt2.gasUsed * receipt2.gasPrice;
+
+            // 最终余额
+            const finalBidder1Balance = await ethers.provider.getBalance(bidder1.address);
+            const finalBidder2Balance = await ethers.provider.getBalance(bidder2.address);
+
+            console.log("bidder1初始余额:", ethers.formatEther(initialBidder1Balance));
+            console.log("bidder1第一次出价后余额:", ethers.formatEther(afterFirstBidBalance));
+            console.log("bidder1最终余额:", ethers.formatEther(finalBidder1Balance));
+            console.log("bidder2初始余额:", ethers.formatEther(initialBidder2Balance));
+            console.log("bidder2最终余额:", ethers.formatEther(finalBidder2Balance));
+
+            // 验证第一个出价者收到了ETH退款（考虑gas费用）
+            // 期望：最终余额 ≈ 初始余额 - 两次交易的gas费用
+            const expectedBidder1Balance = initialBidder1Balance - gasUsed1;
+            expect(finalBidder1Balance).to.be.closeTo(expectedBidder1Balance, ethers.parseEther("0.01"));
+
+            // 验证第二个出价者成为新的最高出价者
+            const auctionInfo = await auction.auctions(0);
+            expect(auctionInfo.highestBidder).to.equal(bidder2.address);
+            expect(auctionInfo.highestBid).to.equal(secondBidAmount);
+        });
+    });
+
+    describe("ERC20支付给卖家", function () {
+        let mockERC20, mockPriceFeed;
+
+        beforeEach(async function () {
+            // 部署ERC20代币
+            const MockERC20 = await ethers.getContractFactory("MockERC20");
+            mockERC20 = await MockERC20.deploy("Test Token", "TEST", ethers.parseEther("1000"));
+            await mockERC20.waitForDeployment();
+
+            // 部署价格预言机
+            const MockPriceFeed = await ethers.getContractFactory("MockPriceFeed");
+            mockPriceFeed = await MockPriceFeed.deploy(1 * 10 ** 8); // 1:1 价格
+            await mockPriceFeed.waitForDeployment();
+
+            // 设置价格预言机
+            await auction.connect(admin).setPriceFeed(ethers.ZeroAddress, await mockPriceFeed.getAddress());
+            await auction.connect(admin).setPriceFeed(await mockERC20.getAddress(), await mockPriceFeed.getAddress());
+
+            // 创建拍卖
+            await auction.connect(admin).createAuction(
+                600,
+                nftAddress,
+                ethers.parseEther("100"),
+                tokenId
+            );
+
+            // 给bidder1转账ERC20代币
+            await mockERC20.connect(admin).transfer(bidder1.address, ethers.parseEther("200"));
+        });
+
+        it("应该执行ERC20支付给卖家分支", async function () {
+            // 记录卖家初始余额
+            const initialSellerBalance = await mockERC20.balanceOf(admin.address);
+
+            // 出价者授权并出价
+            await mockERC20.connect(bidder1).approve(await auction.getAddress(), ethers.parseEther("150"));
             await auction.connect(bidder1).bidWith(
                 0,
                 ethers.parseEther("150"),
@@ -433,11 +563,57 @@ describe("NFT Auction Market", function () {
             await ethers.provider.send("evm_increaseTime", [600]);
             await ethers.provider.send("evm_mine");
 
-            // 结束拍卖
+            // 记录拍卖合约余额
+            const contractBalanceBefore = await mockERC20.balanceOf(await auction.getAddress());
+
+            // 结束拍卖 - 这会触发ERC20支付给卖家分支
             await auction.connect(admin).endAuction(0);
 
+            // 验证卖家收到了ERC20代币
+            const finalSellerBalance = await mockERC20.balanceOf(admin.address);
+            expect(finalSellerBalance).to.equal(initialSellerBalance + ethers.parseEther("150"));
+
+            // 验证拍卖合约的ERC20余额减少
+            const contractBalanceAfter = await mockERC20.balanceOf(await auction.getAddress());
+            expect(contractBalanceAfter).to.equal(contractBalanceBefore - ethers.parseEther("150"));
+
+            // 验证拍卖已结束
             const auctionInfo = await auction.auctions(0);
             expect(auctionInfo.ended).to.be.true;
+
+            // 验证NFT转移
+            expect(await nftContract.ownerOf(tokenId)).to.equal(bidder1.address);
+        });
+    });
+
+    //////
+    describe("合约升级权限", function () {
+        it("应该正确设置管理员", async function () {
+            // 验证管理员地址正确设置
+            const adminAddress = await auction.admin();
+            expect(adminAddress).to.equal(admin.address);
+        });
+
+        // it("非管理员不能设置价格预言机", async function () {
+        //     const MockPriceFeed = await ethers.getContractFactory("MockPriceFeed");
+        //     const mockPriceFeed = await MockPriceFeed.deploy(2000 * 10 ** 8);
+        //     await mockPriceFeed.waitForDeployment();
+
+        //     // 非管理员应该被拒绝
+        //     await expect(
+        //         auction.connect(bidder1).setPriceFeed(ethers.ZeroAddress, await mockPriceFeed.getAddress())
+        //     ).to.be.reverted;
+        // });
+
+        it("管理员能够设置价格预言机", async function () {
+            const MockPriceFeed = await ethers.getContractFactory("MockPriceFeed");
+            const mockPriceFeed = await MockPriceFeed.deploy(2000 * 10 ** 8);
+            await mockPriceFeed.waitForDeployment();
+
+            // 管理员应该能够成功设置
+            await expect(
+                auction.connect(admin).setPriceFeed(ethers.ZeroAddress, await mockPriceFeed.getAddress())
+            ).not.to.be.reverted;
         });
     });
 });
